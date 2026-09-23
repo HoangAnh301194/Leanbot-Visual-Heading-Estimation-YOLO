@@ -1,0 +1,122 @@
+LeanbotController:
+  LeanbotTinyRC:
+    Version: "Leanbot Tiny RC 260918:092800"
+
+    ManualControl:
+      Velocity: 2000
+
+      KeyMap:
+        "8":
+          name: "Forward"
+          speed_l: 4
+          speed_r: 4
+
+        "2":
+          name: "Backward"
+          speed_l: -4
+          speed_r: -4
+
+        "4":
+          name: "Turn Left"
+          speed_l: -4
+          speed_r: 4
+
+        "6":
+          name: "Turn Right"
+          speed_l: 4
+          speed_r: -4
+
+        "7":
+          name: "Forward Left"
+          speed_l: 2
+          speed_r: 4
+
+        "9":
+          name: "Forward Right"
+          speed_l: 4
+          speed_r: 2
+
+        "1":
+          name: "Back Left"
+          speed_l: -2
+          speed_r: -4
+
+        "3":
+          name: "Back Right"
+          speed_l: -4
+          speed_r: -2
+
+        "5":
+          name: "Stop"
+          speed_l: 0
+          speed_r: 0
+
+      ControlKey:
+        End: "e"
+  LeanbotBLE:
+
+    # Bluetooth adapter used by LeanbotBLE.
+    # Specify the adapter name (e.g. hci0, hci1) identified from the commands below.
+    # This setting is only applicable on Linux and is ignored on other systems (e.g. Windows).
+    # If not configured, the system's default/primary Bluetooth adapter will be used.
+    bluetoothAdapter: "hci0" #  Built-in Bluetooth adapter
+    # bluetoothAdapter: "hci1" #  USB Bluetooth dongle
+
+    # How to identify which adapter to use:
+    # 1. List all available Bluetooth adapters using:
+    #    hciconfig -a
+    #
+    # Example output:
+    # hciconfig -a
+      # hci1:   Type: Primary  Bus: USB
+      #         BD Address: 04:7F:0E:3C:CB:0C  ACL MTU: 1021:9  SCO MTU: 255:0
+      #         UP RUNNING
+      #         RX bytes:89857 acl:2437 sco:0 events:1817 errors:0
+      #         TX bytes:48506 acl:374 sco:0 commands:999 errors:0
+      #         Features: 0xbf 0xee 0xcd 0xfe 0xdb 0xff 0x7b 0x87
+      #         Packet type: DM1 DM3 DM5 DH1 DH3 DH5 HV1 HV3
+      #         Link policy: RSWITCH SNIFF
+      #         Link mode: PERIPHERAL ACCEPT
+      #         Name: 'dtt-leanbot-farm'
+      #         Class: 0x000104
+      #         Service Classes: Unspecified
+      #         Device Class: Computer, Desktop workstation
+      #         HCI Version: 5.1 (0xa)  Revision: 0x89
+      #         LMP Version: 5.1 (0xa)  Subversion: 0x89
+      #         Manufacturer: Barrot Technology Limited (2279)
+
+      # hci0:   Type: Primary  Bus: USB
+      #         BD Address: 54:35:30:89:B0:D6  ACL MTU: 1022:8  SCO MTU: 183:5
+      #         UP RUNNING
+      #         RX bytes:17445 acl:297 sco:0 events:632 errors:0
+      #         TX bytes:23898 acl:44 sco:0 commands:521 errors:0
+      #         Features: 0xff 0xfe 0x0d 0xfe 0xd8 0x7f 0x7b 0x8f
+      #         Packet type: DM1 DM3 DM5 DH1 DH3 DH5 HV1 HV2 HV3
+      #         Link policy: RSWITCH HOLD SNIFF
+      #         Link mode: PERIPHERAL ACCEPT
+      #         Name: 'dtt-leanbot-farm #1'
+      #         Class: 0x000104
+      #         Service Classes: Unspecified
+      #         Device Class: Computer, Desktop workstation
+      #         HCI Version: 4.1 (0x7)  Revision: 0x3101
+      #         LMP Version: 4.1 (0x7)  Subversion: 0x1
+      #         Manufacturer: Atheros Communications, Inc. (69)
+      #
+      # 2. To identify the correct adapter, use the following command to
+      #    display the MAC address and vendor/model information for each adapter:
+      #
+      #    for hci in /sys/class/bluetooth/hci[0-9]; do name=$(basename "$hci"); echo "===== $name ====="; hciconfig "$name" | awk '/BD Address/ {print "MAC: " $3}'; udevadm info -q property -p "$hci/device" 2>/dev/null | grep -E '^ID_VENDOR_FROM_DATABASE=|^ID_MODEL_FROM_DATABASE='; done
+      #
+      #    Example output:
+      #
+      #    ===== hci0 =====
+      #    MAC: 54:35:30:89:B0:D6
+      #    ID_VENDOR_FROM_DATABASE=Qualcomm Atheros Communications
+      #    ID_MODEL_FROM_DATABASE=AR9462 Bluetooth
+      #
+      #    ===== hci1 =====
+      #    MAC: 04:7F:0E:3C:CB:0C
+      #    ID_VENDOR_FROM_DATABASE=Cambridge Silicon Radio, Ltd
+      #    ID_MODEL_FROM_DATABASE=Bluetooth Dongle (HCI mode)
+
+
