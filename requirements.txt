@@ -5,3 +5,5 @@ ultralytics
 openvino
 matplotlib
 psutil
+bleak==3.0.2
+readchar==4.2.2
