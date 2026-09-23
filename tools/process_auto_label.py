@@ -104,7 +104,13 @@ def choose_background(backgrounds, background_index: int):
     return backgrounds[background_index]
 
 
-def prepare_session_context(session_dir: Path, output_paths: dict[str, Path], args, effective_class_id: int = None):
+def prepare_session_context(
+    session_dir: Path,
+    output_paths: dict[str, Path],
+    args,
+    effective_class_id: int = None,
+    fallback_roi_points=None,
+):
     backgrounds = load_background_images(session_dir)
     background_path, background_image = choose_background(backgrounds, args.background_index)
 
@@ -117,6 +123,7 @@ def prepare_session_context(session_dir: Path, output_paths: dict[str, Path], ar
         background_path=background_path,
         background_image=background_image,
         reset_roi=args.reset_roi,
+        fallback_roi_points=fallback_roi_points,
     )
 
     board_mask = build_mask(background_image.shape, roi_points)
@@ -149,7 +156,7 @@ def prepare_session_context(session_dir: Path, output_paths: dict[str, Path], ar
     save_config_dict(config_path, config)
 
     save_roi_preview(background_image, roi_points, output_session_dir / "roi_preview.jpg")
-    return bg_masked, board_mask, aligner, config
+    return bg_masked, board_mask, aligner, config, roi_points
 
 
 def show_debug_preview(diff_mask, aligned_img, bboxes, wait_ms: int):
@@ -158,21 +165,21 @@ def show_debug_preview(diff_mask, aligned_img, bboxes, wait_ms: int):
         cv2.rectangle(vis_bbox, (x, y), (x + w, y + h), (0, 255, 0), 3)
 
     cv2.imshow("3. Difference Mask", cv2.resize(diff_mask, (PREVIEW_WIDTH, PREVIEW_HEIGHT)))
-    cv2.imshow("4. Bounding Box Result", cv2.resize(vis_bbox, (PREVIEW_WIDTH, PREVIEW_HEIGHT)))
+    cv2.imshow("4. Detection Result", cv2.resize(vis_bbox, (PREVIEW_WIDTH, PREVIEW_HEIGHT)))
     cv2.waitKey(wait_ms)
 
 
-def process_session(session_dir: Path, args):
+def process_session(session_dir: Path, args, fallback_roi_points=None):
     session_name = session_dir.name
     backgrounds = load_background_images(session_dir)
     if not backgrounds:
         print(f"\n>>> Skipping {session_name}: no background images found in raw_image/session_X/backgrounds.")
-        return {"images": 0, "positive": 0, "negative": 0, "failed": 0}
+        return {"images": 0, "positive": 0, "negative": 0, "failed": 0}, fallback_roi_points
 
     raw_images = load_raw_images(session_dir)
     if not raw_images:
         print(f"\n>>> Skipping {session_name}: no raw images found in raw_image/session_X/raw_images.")
-        return {"images": 0, "positive": 0, "negative": 0, "failed": 0}
+        return {"images": 0, "positive": 0, "negative": 0, "failed": 0}, fallback_roi_points
 
     output_paths = create_output_session_dir(session_name)
     print(f"\n>>> Processing {session_name}")
@@ -195,12 +202,12 @@ def process_session(session_dir: Path, args):
     print(f"    Output: {output_paths['session_dir']}")
 
     try:
-        bg_masked, board_mask, aligner, config = prepare_session_context(
-            session_dir, output_paths, args, effective_class_id=effective_class_id
+        bg_masked, board_mask, aligner, config, roi_points = prepare_session_context(
+            session_dir, output_paths, args, effective_class_id=effective_class_id, fallback_roi_points=fallback_roi_points
         )
     except Exception as exc:
         print(f"   [FAIL] Could not prepare session context: {exc}")
-        return {"images": 0, "positive": 0, "negative": 0, "failed": len(raw_images)}
+        return {"images": 0, "positive": 0, "negative": 0, "failed": len(raw_images)}, fallback_roi_points
 
     detection_kwargs = build_detection_kwargs(args)
 
@@ -245,7 +252,7 @@ def process_session(session_dir: Path, args):
 
     config["summary"] = summary
     save_config_dict(output_paths["session_dir"] / "config.npy", config)
-    return summary
+    return summary, roi_points
 
 
 def build_shared_config(args, sessions_processed: list[str], total: dict) -> dict:
@@ -310,9 +317,10 @@ def main(argv=None):
 
     total = {"sessions": 0, "images": 0, "positive": 0, "negative": 0, "failed": 0}
     sessions_processed = []
+    cached_roi_points = None
     try:
         for session_dir in sessions:
-            summary = process_session(session_dir, args)
+            summary, cached_roi_points = process_session(session_dir, args, fallback_roi_points=cached_roi_points)
             total["sessions"] += 1
             total["images"] += summary["images"]
             total["positive"] += summary["positive"]

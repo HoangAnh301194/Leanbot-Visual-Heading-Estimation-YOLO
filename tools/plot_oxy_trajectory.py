@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -47,29 +48,69 @@ def find_columns(df: pd.DataFrame):
     return x_col, y_col, frame_col
 
 
-def load_trajectory(csv_path: Path):
+def build_time_axis(df, valid_mask, frame_col):
+    valid_rows = df.loc[valid_mask]
+    if 'timestamp' in valid_rows.columns:
+        timestamps = pd.to_timedelta(valid_rows['timestamp'].astype(str), errors='coerce')
+        if timestamps.notna().all():
+            seconds = timestamps.dt.total_seconds().to_numpy(dtype=float)
+            continuous_seconds = seconds.copy()
+            day_offset = 0.0
+            for index in range(1, len(continuous_seconds)):
+                candidate = seconds[index] + day_offset
+                if candidate < continuous_seconds[index - 1]:
+                    day_offset += 24 * 60 * 60
+                    candidate = seconds[index] + day_offset
+                continuous_seconds[index] = candidate
+            return continuous_seconds - continuous_seconds[0], 'Elapsed time (s)'
+
+    if frame_col:
+        frame_values = pd.to_numeric(valid_rows[frame_col], errors='coerce')
+        if frame_values.notna().all():
+            return frame_values.to_numpy(dtype=float), frame_col
+
+    return np.arange(len(valid_rows), dtype=float), 'Valid sample index'
+
+
+def apply_bidirectional_ema(data_array, alpha):
+    """Làm mượt dữ liệu 1D bằng Bidirectional Exponential Moving Average."""
+    series = pd.Series(data_array)
+    # Lọc tiến
+    f_ema = series.ewm(alpha=alpha, adjust=False).mean()
+    # Lọc lùi
+    b_ema = f_ema.iloc[::-1].ewm(alpha=alpha, adjust=False).mean().iloc[::-1]
+    return b_ema.to_numpy(dtype=float)
+
+
+def load_trajectory_data(csv_path: Path, ema_alpha: float = None):
     """Đọc và lọc các điểm quỹ đạo hợp lệ từ một file CSV."""
     df = pd.read_csv(csv_path)
     if df.empty:
         raise ValueError("file rỗng")
 
-    x_col, y_col, _ = find_columns(df)
+    x_col, y_col, frame_col = find_columns(df)
     if not x_col or not y_col:
         raise ValueError("không tìm thấy cột x_center/y_center")
 
     x_values = pd.to_numeric(df[x_col], errors='coerce')
     y_values = pd.to_numeric(df[y_col], errors='coerce')
-    valid_mask = x_values.notna() & y_values.notna() & (x_values > 0) & (y_values > 0)
-
-    if 'tracking_lost' in df.columns:
-        tracking_lost = pd.to_numeric(df['tracking_lost'], errors='coerce').fillna(1)
-        valid_mask &= tracking_lost.eq(0)
+    valid_mask = x_values.notna() & y_values.notna()
 
     x = x_values[valid_mask].to_numpy(dtype=float)
     y = y_values[valid_mask].to_numpy(dtype=float)
     if len(x) < 2:
         raise ValueError("không đủ dữ liệu hợp lệ, cần ít nhất 2 điểm")
 
+    if ema_alpha is not None and 0 < ema_alpha <= 1:
+        x = apply_bidirectional_ema(x, ema_alpha)
+        y = apply_bidirectional_ema(y, ema_alpha)
+
+    time_values, time_label = build_time_axis(df, valid_mask, frame_col)
+    return x, y, time_values, time_label
+
+
+def load_trajectory(csv_path: Path, ema_alpha: float = None):
+    x, y, _, _ = load_trajectory_data(csv_path, ema_alpha)
     return x, y
 
 
@@ -162,6 +203,8 @@ def fit_ellipse_to_pts(x_pts, y_pts):
         # Orient angle to major axis
         if d2 > d1:
             angle = (angle + 90) % 360
+        if np.cos(np.radians(angle)) < 0:
+            angle = (angle + 180) % 360
             
         t = np.linspace(0, 2 * np.pi, 360)
         rad = np.radians(angle)
@@ -226,6 +269,14 @@ def draw_fitted_ellipse(ax, ellipse_info, contour_color='red', major_color='dark
     ax.plot(major_axis[:, 0], major_axis[:, 1], '-', color=major_color,
             linewidth=2.2, alpha=alpha, zorder=5,
             label=f'Major axis: {2 * semi_major:.1f} px' if show_labels else None)
+    positive_major_endpoint = major_axis[int(np.argmax(major_axis[:, 0]))]
+    ax.annotate(
+        '',
+        xy=positive_major_endpoint,
+        xytext=(center_x, center_y),
+        arrowprops=dict(arrowstyle='->', color=major_color, linewidth=2.2, alpha=alpha),
+        zorder=6,
+    )
     ax.plot(minor_axis[:, 0], minor_axis[:, 1], '-', color=minor_color,
             linewidth=2.2, alpha=alpha, zorder=5,
             label=f'Minor axis: {2 * semi_minor:.1f} px' if show_labels else None)
@@ -233,18 +284,83 @@ def draw_fitted_ellipse(ax, ellipse_info, contour_color='red', major_color='dark
                marker='+', s=120, linewidth=2, alpha=alpha, zorder=6,
                label='Ellipse center' if show_labels else None)
 
+
+def calculate_ellipse_phase_angles(x, y, ellipse_info, cartesian=False):
+    """Tính phase tham số ellipse, 0° tại trục lớn hướng sang phải, CCW dương."""
+    center_x, center_y = ellipse_info['center']
+    semi_major, semi_minor = ellipse_info['axes']
+    if semi_major <= 0 or semi_minor <= 0:
+        raise ValueError("ellipse axes must be positive")
+    ellipse_angle = np.radians(float(ellipse_info['angle']))
+    delta_x = np.asarray(x, dtype=float) - center_x
+    delta_y = np.asarray(y, dtype=float) - center_y
+
+    cos_angle = np.cos(ellipse_angle)
+    sin_angle = np.sin(ellipse_angle)
+    x_local = delta_x * cos_angle + delta_y * sin_angle
+    y_local = -delta_x * sin_angle + delta_y * cos_angle
+
+    normalized_x = x_local / semi_major
+    normalized_y_cartesian = -y_local / semi_minor
+    phase_radians = np.arctan2(normalized_y_cartesian, normalized_x)
+
+    wrapped_angles = np.mod(np.degrees(phase_radians), 360.0)
+    continuous_angles = np.degrees(np.unwrap(phase_radians))
+    return wrapped_angles, continuous_angles
+
+
+def plot_ellipse_angle_over_time(time_values, time_label, wrapped_angles,
+                                 continuous_angles, csv_path, out_dir, dpi,
+                                 output_stem, cartesian=False):
+    fig, (wrapped_ax, continuous_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(12, 8),
+        dpi=dpi,
+        sharex=True,
+    )
+
+    wrapped_ax.plot(time_values, wrapped_angles, color='tab:blue', linewidth=1.5)
+    wrapped_ax.scatter(time_values, wrapped_angles, color='tab:blue', s=8, alpha=0.45)
+    wrapped_ax.set_ylabel('Angle (degrees)', fontweight='bold')
+    wrapped_ax.set_ylim(0, 360)
+    wrapped_ax.set_yticks(np.arange(0, 361, 45))
+    wrapped_ax.grid(True, linestyle='--', alpha=0.5)
+    wrapped_ax.set_title('Wrapped angle relative to ellipse major axis (0-360 deg)')
+
+    continuous_ax.plot(time_values, continuous_angles, color='tab:red', linewidth=1.7)
+    continuous_ax.set_xlabel(time_label, fontweight='bold')
+    continuous_ax.set_ylabel('Continuous angle (degrees)', fontweight='bold')
+    continuous_ax.grid(True, linestyle='--', alpha=0.5)
+    continuous_ax.set_title('Continuous angle progression across ellipse revolutions')
+
+    fig.suptitle(
+        f"Ellipse Phase Angle Over Time - {csv_path.name}\n"
+        "0 deg = rightward major-axis direction; positive = counter-clockwise",
+        fontsize=14,
+        fontweight='bold',
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+
+    out_file = Path(out_dir) / f"{output_stem}_ellipse_angle_over_time.png"
+    fig.savefig(out_file, dpi=dpi, bbox_inches='tight', pad_inches=0.15)
+    plt.close(fig)
+    print(f"[SUCCESS] Da luu do thi goc ellipse theo thoi gian: {out_file}")
+    return out_file
+
+
 def plot_single_oxy(csv_path: Path, out_dir: Path = None, fit_ellipse: bool = True,
                     cartesian: bool = False, frame_width: int = DEFAULT_FRAME_WIDTH,
                     frame_height: int = DEFAULT_FRAME_HEIGHT, dpi: int = DEFAULT_DPI,
                     full_frame: bool = False, padding_ratio: float = DEFAULT_PADDING_RATIO,
-                    output_name: str = None):
+                    output_name: str = None, ema_alpha: float = None):
     """Vẽ đồ thị quy đạo Oxy cho 1 file CSV log."""
     if not csv_path.exists():
         print(f"[ERROR] File không tồn tại: {csv_path}")
         return None
         
     try:
-        x, y = load_trajectory(csv_path)
+        x, y, time_values, time_label = load_trajectory_data(csv_path, ema_alpha)
     except (OSError, ValueError, pd.errors.ParserError) as error:
         print(f"[ERROR] Không thể đọc quỹ đạo từ {csv_path}: {error}")
         return None
@@ -274,15 +390,29 @@ def plot_single_oxy(csv_path: Path, out_dir: Path = None, fit_ellipse: bool = Tr
     
     # Fit Ellipse nếu được bật
     ellipse_info = None
+    ellipse_fit_time_ms = None
+    ellipse_draw_time_ms = None
+    ellipse_total_time_ms = None
     limit_x = x
     limit_y = y
     if fit_ellipse and len(x) >= 5:
+        fit_start = time.perf_counter()
         ellipse_info = fit_ellipse_to_pts(x, y)
+        ellipse_fit_time_ms = (time.perf_counter() - fit_start) * 1000.0
         if ellipse_info:
+            draw_start = time.perf_counter()
             draw_fitted_ellipse(ax, ellipse_info)
             ellipse_x, ellipse_y = ellipse_plot_points(ellipse_info)
+            ellipse_draw_time_ms = (time.perf_counter() - draw_start) * 1000.0
+            ellipse_total_time_ms = ellipse_fit_time_ms + ellipse_draw_time_ms
             limit_x = np.concatenate((x, ellipse_x))
             limit_y = np.concatenate((y, ellipse_y))
+            print(
+                f"[DEBUG] Ellipse points={len(x)} | "
+                f"fit={ellipse_fit_time_ms:.3f} ms | "
+                f"draw={ellipse_draw_time_ms:.3f} ms | "
+                f"total={ellipse_total_time_ms:.3f} ms"
+            )
 
     # Thiết lập hệ trục Oxy
     ax.grid(True, linestyle='--', alpha=0.5)
@@ -318,6 +448,26 @@ def plot_single_oxy(csv_path: Path, out_dir: Path = None, fit_ellipse: bool = Tr
         frame_height=frame_height,
         padding_ratio=padding_ratio,
     )
+    if ellipse_info:
+        debug_text = (
+            "Ellipse debug\n"
+            f"XY points: {len(x)}\n"
+            f"Fit time: {ellipse_fit_time_ms:.3f} ms\n"
+            f"Draw time: {ellipse_draw_time_ms:.3f} ms\n"
+            f"Fit + draw: {ellipse_total_time_ms:.3f} ms"
+        )
+        ax.text(
+            0.02,
+            0.02,
+            debug_text,
+            transform=ax.transAxes,
+            fontsize=9,
+            fontfamily='monospace',
+            verticalalignment='bottom',
+            horizontalalignment='left',
+            bbox=dict(boxstyle='round', facecolor='white', edgecolor='black', alpha=0.88),
+            zorder=10,
+        )
     ax.legend(loc='best', fontsize=9, framealpha=0.9)
 
     plt.tight_layout()
@@ -333,7 +483,27 @@ def plot_single_oxy(csv_path: Path, out_dir: Path = None, fit_ellipse: bool = Tr
     plt.savefig(out_file, dpi=dpi, bbox_inches='tight', pad_inches=0.15)
     print(f"[SUCCESS] Đã lưu đồ thị Oxy trajectory: {out_file}")
     plt.close(fig)
-    
+
+    angle_output_path = None
+    if ellipse_info:
+        wrapped_angles, continuous_angles = calculate_ellipse_phase_angles(
+            x,
+            y,
+            ellipse_info,
+            cartesian=cartesian,
+        )
+        angle_output_path = plot_ellipse_angle_over_time(
+            time_values,
+            time_label,
+            wrapped_angles,
+            continuous_angles,
+            csv_path,
+            out_dir,
+            dpi,
+            output_stem,
+            cartesian=cartesian,
+        )
+
     return {
         'csv_name': csv_path.name,
         'valid_points': len(x),
@@ -343,14 +513,18 @@ def plot_single_oxy(csv_path: Path, out_dir: Path = None, fit_ellipse: bool = Tr
         'span_y': span_y,
         'frame_size': (frame_width, frame_height),
         'ellipse': ellipse_info,
-        'output_path': out_file
+        'ellipse_fit_time_ms': ellipse_fit_time_ms,
+        'ellipse_draw_time_ms': ellipse_draw_time_ms,
+        'ellipse_total_time_ms': ellipse_total_time_ms,
+        'output_path': out_file,
+        'angle_output_path': angle_output_path,
     }
 
 def plot_multi_oxy(csv_files: list, out_dir: Path, cartesian: bool = False,
                    fit_ellipse: bool = False, frame_width: int = DEFAULT_FRAME_WIDTH,
                    frame_height: int = DEFAULT_FRAME_HEIGHT, dpi: int = DEFAULT_DPI,
                    full_frame: bool = False, padding_ratio: float = DEFAULT_PADDING_RATIO,
-                   display_labels: list = None):
+                   display_labels: list = None, ema_alpha: float = None):
     """Vẽ đè nhiều quỹ đạo di chuyển của nhiều file CSV lên cùng 1 đồ thị Oxy để so sánh."""
     fig, ax = plt.subplots(figsize=(14, 9), dpi=dpi)
     cmap = plt.get_cmap('tab20')
@@ -361,7 +535,7 @@ def plot_multi_oxy(csv_files: list, out_dir: Path, cartesian: bool = False,
     all_y = []
     for idx, csv_path in enumerate(csv_files):
         try:
-            x, y = load_trajectory(csv_path)
+            x, y = load_trajectory(csv_path, ema_alpha)
             
             color = colors[idx]
             label = display_labels[idx] if display_labels else concise_path_label(csv_path)
@@ -464,6 +638,7 @@ def main():
     parser.add_argument("--frame-width", type=int, default=DEFAULT_FRAME_WIDTH, help="Chiều rộng frame khi dùng --full-frame")
     parser.add_argument("--frame-height", type=int, default=DEFAULT_FRAME_HEIGHT, help="Chiều cao frame khi dùng --full-frame")
     parser.add_argument("--dpi", type=int, default=DEFAULT_DPI, help="DPI ảnh đầu ra, mặc định 100")
+    parser.add_argument("--ema-alpha", type=float, default=None, help="Hệ số làm mượt Bidirectional EMA (0 < alpha <= 1)")
 
     args = parser.parse_args()
     if args.padding < 0:
@@ -517,6 +692,7 @@ def main():
             full_frame=args.full_frame,
             padding_ratio=args.padding,
             output_name=safe_output_stem(csv_file) if use_path_in_name else None,
+            ema_alpha=args.ema_alpha,
         )
         if result:
             plotted_files.append(csv_file)
@@ -533,6 +709,7 @@ def main():
             full_frame=args.full_frame,
             padding_ratio=args.padding,
             display_labels=[concise_path_label(csv_file) for csv_file in csv_files],
+            ema_alpha=args.ema_alpha,
         )
 
     print(f"[DONE] Đã vẽ {len(plotted_files)}/{len(csv_files)} quỹ đạo riêng.")

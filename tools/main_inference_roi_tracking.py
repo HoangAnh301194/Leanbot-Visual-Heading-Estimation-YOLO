@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-from collections import deque
 import pandas as pd
 import time
 import psutil
@@ -16,8 +15,6 @@ from ultralytics import YOLO
 import openvino as ov
 
 # Add tools directory to import check_confidence
-
-
 sys.path.append(str(Path(__file__).resolve().parent))
 import check_confidence
 
@@ -25,6 +22,10 @@ import check_confidence
 IOU_THRES = 0.5
 CLASS_ANGLE_MAP = {}
 ANGLE_PATTERN = re.compile(r"^Leanbot_(?:(?P<sign>[pm])(?P<value>\d+)|(?P<plain>\d+))$")
+TRAJECTORY_COLOR = (200, 96, 0)
+TRAJECTORY_THICKNESS = 6
+VECTOR_COLOR = (0, 0, 255)
+VECTOR_PIXELS_PER_MAGNITUDE = 5.0
 
 def parse_angle_from_class_name(class_name: str):
     """Returns the angle (float) encoded in the class name, or None if not an angle class."""
@@ -284,6 +285,29 @@ def select_best_vector_detection(compiled_model, image, names,
 def safe_timestamp_for_filename(text: str):
     return text.replace(":", "-").replace(".", "-")
 
+def draw_vector_arrow(image, center, angle_deg, magnitude):
+    angle_rad = math.radians(angle_deg)
+    max_length = max(1, int(min(image.shape[:2]) * 0.25))
+    arrow_length = int(np.clip(round(magnitude * VECTOR_PIXELS_PER_MAGNITUDE), 1, max_length))
+    end_point = (
+        int(round(center[0] + arrow_length * math.cos(angle_rad))),
+        int(round(center[1] - arrow_length * math.sin(angle_rad))),
+    )
+    cv2.circle(image, center, 6, VECTOR_COLOR, -1, cv2.LINE_AA)
+    cv2.arrowedLine(image, center, end_point, VECTOR_COLOR, 4, cv2.LINE_AA, tipLength=0.25)
+    label_x = min(max(end_point[0] + 8, 0), max(image.shape[1] - 220, 0))
+    label_y = min(max(end_point[1] - 8, 20), image.shape[0] - 5)
+    cv2.putText(
+        image,
+        f"M={magnitude:.2f} A={angle_deg:.1f} deg",
+        (label_x, label_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        VECTOR_COLOR,
+        2,
+        cv2.LINE_AA,
+    )
+
 def make_multiple_of_32(val):
     return int(np.ceil(val / 32.0) * 32)
 
@@ -313,25 +337,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default="0", help="Camera index or video path")
     parser.add_argument("--video", default="", help="Path to video file (neu co se uu tien dung thay cho source)")
-    parser.add_argument("--mode", default="roi", choices=["roi", "baseline"], help="Che do chay: roi hoac baseline")
-    parser.add_argument("--log", default="", help="Ten file csv de luu log (mac dinh tu tao theo mode)")
+    parser.add_argument("--log", default="", help="Ten file csv de luu log")
     parser.add_argument("--width", type=int, default=1280, help="Chieu rong camera mong muon")
     parser.add_argument("--height", type=int, default=720, help="Chieu cao camera mong muon")
-    parser.add_argument("--no-show", action="store_true", help="Khong hien thi cua so OpenCV")
-    parser.add_argument("--show", action="store_true", help="Bat cua so OpenCV neu moi truong ho tro GUI")
     parser.add_argument("--device", default="CPU", choices=["CPU", "GPU", "AUTO"], help="OpenVINO device (default CPU de benchmark tai lap)")
     parser.add_argument("--full-model", default=r"models\YOLO11n_versions\FP16_NO_NMS\best_fp16_no_nms_imgsz640_openvino_model", help="Path to full detection model directory")
     parser.add_argument("--tracking-model", default=r"models\YOLO11n_versions\FP16_NO_NMS\best_fp16_no_nms_imgsz160_openvino_model", help="Path to ROI tracking model directory")
     # --- Tham so vector pipeline (chi dung khi model la no-NMS / raw output) ---
     parser.add_argument("--topk", type=int, default=100, help="Top-K anchors cho no-NMS pipeline (default 100)")
-    parser.add_argument("--conf", type=float, default=0.25, help="Nguong confidence loc anchor FULL 640 (default 0.25)")
-    parser.add_argument("--roi_conf", type=float, default=0.15, help="Nguong confidence loc anchor ROI 160 (default 0.15)")
+    parser.add_argument("--conf", type=float, default=0.1, help="Nguong confidence loc anchor FULL 640 (default 0.25)")
+    parser.add_argument("--roi_conf", type=float, default=0.1, help="Nguong confidence loc anchor ROI 160 (default 0.15)")
     parser.add_argument("--iou", type=float, default=IOU_THRES, help="Nguong IoU gom nhom anchor (default 0.5)")
-    parser.add_argument("--mag-threshold", type=float, default=2.0, help="Vector magnitude toi thieu de chap nhan nhom (default 2.0)")
+    parser.add_argument("--mag-threshold", type=float, default=1.0, help="Vector magnitude toi thieu de chap nhan nhom (default 1.0)")
     parser.add_argument("--debug-imgsz", action="store_true", help="Luu anh debug cac buoc resize/padding vao benchmark/imgszdebug/")
     args = parser.parse_args()
-    if not args.show:
-        args.no_show = True
+    args.no_show = False
 
     full_model_path = args.full_model
     tracking_model_path = args.tracking_model
@@ -352,17 +372,14 @@ def main():
     )
     print(f"[INFO] Full model execution device: {full_compiled_model.get_property('EXECUTION_DEVICES')}")
     
-    if args.mode == "roi":
-        tracking_model = YOLO(tracking_model_path, task='detect')
-        tracking_xml = [f for f in os.listdir(tracking_model_path) if f.endswith('.xml')][0]
-        tracking_compiled_model = ov_core.compile_model(
-            os.path.join(tracking_model_path, tracking_xml),
-            args.device,
-            {"PERFORMANCE_HINT": "LATENCY"}
-        )
-        print(f"[INFO] ROI model execution device: {tracking_compiled_model.get_property('EXECUTION_DEVICES')}")
-    else:
-        tracking_compiled_model = None
+    tracking_model = YOLO(tracking_model_path, task='detect')
+    tracking_xml = [f for f in os.listdir(tracking_model_path) if f.endswith('.xml')][0]
+    tracking_compiled_model = ov_core.compile_model(
+        os.path.join(tracking_model_path, tracking_xml),
+        args.device,
+        {"PERFORMANCE_HINT": "LATENCY"}
+    )
+    print(f"[INFO] ROI model execution device: {tracking_compiled_model.get_property('EXECUTION_DEVICES')}")
     
     if source.isdigit():
         source = int(source)
@@ -389,7 +406,7 @@ def main():
     if args.log:
         log_file = args.log if os.path.dirname(args.log) else os.path.join("benchmark", args.log)
     else:
-        log_file = os.path.join("benchmark", f"log_{args.mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        log_file = os.path.join("benchmark", f"log_roi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
         
     out_dir = os.path.dirname(log_file)
     if not out_dir:
@@ -416,15 +433,19 @@ def main():
     log_handle = None
     writer = None
     recording = False
+    trajectory_canvas = None
+    trajectory_last_point = None
 
     def start_recording():
-        nonlocal log_handle, writer, recording
+        nonlocal log_handle, writer, recording, trajectory_canvas, trajectory_last_point
         if log_handle is not None:
             log_handle.close()
         log_handle = open(log_file, mode='w', newline='')
         writer = csv.writer(log_handle)
         writer.writerow(csv_header)
         log_handle.flush()
+        trajectory_canvas = None
+        trajectory_last_point = None
         recording = True
         print(f"[INFO] REC ON. Ghi de log tai: {log_file}")
 
@@ -438,7 +459,7 @@ def main():
         recording = False
         print("[INFO] REC OFF.")
 
-    print(f"[INFO] Bat dau Inference ({args.mode.upper()} mode).")
+    print("[INFO] Bat dau Inference (ROI TRACKING mode).")
     if args.no_show:
         print(f"[INFO] No-show mode: tu ghi log tai {log_file}")
         start_recording()
@@ -452,21 +473,12 @@ def main():
     # Da bo tinh nang timeout
 
     windows_positioned = False
-    fps_history = deque(maxlen=20)
-    prev_frame_time = time.perf_counter()
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
                 
-            t_now = time.perf_counter()
-            dt = t_now - prev_frame_time
-            prev_frame_time = t_now
-            if dt > 0:
-                fps_history.append(1.0 / dt)
-            real_fps = (sum(fps_history) / len(fps_history)) if fps_history else 0.0
-
             orig_frame = frame.copy()
 
             frame_id += 1
@@ -485,7 +497,7 @@ def main():
             roi_w, roi_h = 0, 0
             display_bbox = None
 
-            if args.mode == "roi" and prev_roi is not None:
+            if prev_roi is not None:
                 inference_mode = "ROI"
                 rx, ry, rw, rh = prev_roi
                 roi_w, roi_h = rw, rh
@@ -576,13 +588,12 @@ def main():
                 cx = orig_x1 + bw / 2.0
                 cy = orig_y1 + bh / 2.0
 
-                if args.mode == "roi":
-                    # Cap nhat ROI ngay sau moi frame detect thanh cong
-                    prev_roi = calculate_roi(best_box, img_w, img_h)
+                # Cap nhat ROI ngay sau moi frame detect thanh cong
+                prev_roi = calculate_roi(best_box, img_w, img_h)
 
                 display_bbox = (int(orig_x1), int(orig_y1), int(orig_x2), int(orig_y2))
             else:
-                # Mat detect: ca ROI mode (lost tracking) lan FULL/baseline mode (no detection)
+                # Mat detect: quay lai FULL o frame tiep theo de tai bat muc tieu
                 tracking_lost = 1
                 prev_roi = None
                 prev_bbox_xyxy = None
@@ -601,6 +612,26 @@ def main():
                     f"{vector_magnitude:.4f}", f"{angle:.4f}", f"{mag2:.4f}", f"{angle2:.4f}", f"{best_conf:.4f}", tracking_lost
                 ])
                 log_handle.flush()
+                if detected:
+                    current_point = (
+                        int(np.clip(round(cx), 0, img_w - 1)),
+                        int(np.clip(round(cy), 0, img_h - 1)),
+                    )
+                    if trajectory_canvas is None or trajectory_canvas.shape != orig_frame.shape:
+                        trajectory_canvas = np.zeros_like(orig_frame)
+                        trajectory_last_point = None
+                    if trajectory_last_point is not None:
+                        cv2.line(
+                            trajectory_canvas,
+                            trajectory_last_point,
+                            current_point,
+                            TRAJECTORY_COLOR,
+                            TRAJECTORY_THICKNESS,
+                            cv2.LINE_AA,
+                        )
+                    trajectory_last_point = current_point
+                else:
+                    trajectory_last_point = None
 
             def save_lost_tracking_images():
                 capture_prefix = f"lost_frame_{frame_id}_{safe_timestamp_for_filename(timestamp)}_{inference_mode}"
@@ -626,18 +657,29 @@ def main():
                 else:
                     roi_display = np.zeros((target_roi_h, target_roi_w, 3), dtype=np.uint8)
 
+                if trajectory_canvas is not None and trajectory_canvas.shape == detection_frame.shape:
+                    detection_frame = cv2.addWeighted(detection_frame, 1.0, trajectory_canvas, 1.0, 0.0)
+
                 if display_bbox is not None:
                     x1, y1, x2, y2 = display_bbox
                     cv2.rectangle(detection_frame, (x1, y1), (x2, y2), (0, 255, 0), 6)
+
+                if recording and detected:
+                    draw_vector_arrow(
+                        detection_frame,
+                        (int(round(cx)), int(round(cy))),
+                        angle,
+                        vector_magnitude,
+                    )
 
                 detection_frame = detection_frame[:, detection_crop_x:detection_crop_x + detection_crop_w]
 
                 detection_display = detection_frame
 
-                cv2.putText(roi_display, f"FPS: {real_fps:.1f} | Proc: {end_to_end_time_ms:.1f}ms", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(roi_display, f"FPS: {fps:.1f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 cv2.putText(roi_display, f"ROI: {roi_w}x{roi_h}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 0, 0), 2)
 
-                cv2.putText(detection_display, f"FPS: {real_fps:.1f} | Proc: {end_to_end_time_ms:.1f}ms", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(detection_display, f"FPS: {fps:.1f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 cv2.putText(detection_display, f"Vector angle: {angle:.1f} deg", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 0, 0), 2)
                 cv2.putText(detection_display, f"Vector length: {vector_magnitude:.2f}", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 0, 0), 2)
                 if recording and tracking_lost:
@@ -668,7 +710,7 @@ def main():
                         cv2.imwrite(orig_path, orig_frame)
                         print(f"\n[INFO] DA CHUP ANH THU CONG (Frame {frame_id}):\n       - ROI UI: {roi_ui_path}\n       - Detection UI: {detection_ui_path}\n       - Goc: {orig_path}\n")
                 except cv2.error as exc:
-                    print(f"[WARN] OpenCV GUI khong kha dung, tu chuyen sang --no-show: {exc}")
+                    print(f"[WARN] OpenCV GUI khong kha dung, tiep tuc khong hien thi cua so: {exc}")
                     args.no_show = True
                     if not recording:
                         start_recording()
@@ -676,7 +718,7 @@ def main():
                 if recording and tracking_lost:
                     save_lost_tracking_images()
                 if frame_id % 10 == 0:
-                    print(f"[LOG] Frame {frame_id} | Mode: {inference_mode} | FPS: {real_fps:.1f} (Proc: {end_to_end_time_ms:.1f}ms) | CPU: {end_to_end_cpu_load_pct}% | REC: {recording}")
+                    print(f"[LOG] Frame {frame_id} | Mode: {inference_mode} | FPS: {fps:.1f} | CPU: {end_to_end_cpu_load_pct}% | REC: {recording}")
 
             # if not recording:
             #     elapsed_time = time.time() - start_benchmark_time
@@ -690,6 +732,7 @@ def main():
     cap.release()
     if not args.no_show:
         cv2.destroyAllWindows()
+    print(f"[INFO] Hoan tat. Da luu log vao file {log_file}")
 
 if __name__ == "__main__":
     main()

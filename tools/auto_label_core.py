@@ -98,7 +98,7 @@ def capture_session_frames(cap, session_id: str, backgrounds_dir: Path, raw_dir:
 
     print("\n--- CAPTURE SESSION ---")
     print("Press 'b' to capture a background image.")
-    print("Press 'z' (-30), 'x' (-15), 'c' (0), 'v' (15), 'n' (30) to capture raw images with angle prefixes.")
+    print("Press SPACE to capture a raw image.")
     print("Press 's' to save and finish the session.")
     print("Press 'q' to stop immediately.")
 
@@ -128,7 +128,7 @@ def capture_session_frames(cap, session_id: str, backgrounds_dir: Path, raw_dir:
         )
         cv2.putText(
             preview,
-            "b:bkg | z/x/c/v/n:raw | s:save | q:quit",
+            "b:bkg | SPACE:raw | s:save | q:quit",
             (10, 84),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -143,14 +143,8 @@ def capture_session_frames(cap, session_id: str, backgrounds_dir: Path, raw_dir:
             cv2.imwrite(str(file_path), frame)
             background_count += 1
             print(f"[INFO] Saved background: {file_path.name}")
-        elif key in (ord("z"), ord("x"), ord("c"), ord("v"), ord("n")):
-            if key == ord("z"): prefix = "deg_m30_"
-            elif key == ord("x"): prefix = "deg_m15_"
-            elif key == ord("c"): prefix = "deg_0_"
-            elif key == ord("v"): prefix = "deg_p15_"
-            elif key == ord("n"): prefix = "deg_p30_"
-            
-            file_path = raw_dir / f"{prefix}{raw_count:03d}.jpg"
+        elif key == ord(" "):
+            file_path = raw_dir / f"raw_{raw_count:03d}.jpg"
             cv2.imwrite(str(file_path), frame)
             raw_count += 1
             print(f"[INFO] Saved raw image: {file_path.name}")
@@ -313,6 +307,7 @@ def ensure_roi_points(
     background_path: Path,
     background_image,
     reset_roi: bool = False,
+    fallback_roi_points=None,
 ):
     config_path = output_session_dir / "config.npy"
     config = load_config_dict(config_path)
@@ -322,6 +317,16 @@ def ensure_roi_points(
         points = np.asarray(roi_points, dtype=np.int32)
         if points.shape == (4, 2):
             save_roi_preview(background_image, points, output_session_dir / "roi_preview.jpg")
+            return points, config
+
+    if not reset_roi and fallback_roi_points is not None:
+        points = np.asarray(fallback_roi_points, dtype=np.int32)
+        if points.shape == (4, 2):
+            config["roi_points"] = points.astype(int).tolist()
+            config["roi_background_path"] = str(background_path)
+            save_config_dict(config_path, config)
+            save_roi_preview(background_image, points, output_session_dir / "roi_preview.jpg")
+            print("    [INFO] Reusing cached 4-point ROI from previous session.")
             return points, config
 
     print("Select 4 ROI points on the selected background image. Press Enter to confirm.")

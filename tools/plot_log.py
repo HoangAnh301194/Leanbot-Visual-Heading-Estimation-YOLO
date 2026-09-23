@@ -129,6 +129,32 @@ def plot_log(csv_file: str):
         ax_roi2.set_xlabel('Frame ID')
         ax_roi2.set_title("ROI Width/Height Before Resize")
     
+    # ---------------------------------------------------------
+    # 5. Đồ thị Quỹ đạo 2D (nếu có cột smooth_x, smooth_y)
+    # ---------------------------------------------------------
+    has_smooth_cols = 'smooth_x' in df_plot.columns and 'smooth_y' in df_plot.columns
+    if has_smooth_cols:
+        fig_traj, ax_traj = plt.subplots(figsize=(10, 8), dpi=150)
+        # Đường smooth bên dưới
+        ax_traj.plot(df_plot['smooth_x'], df_plot['smooth_y'], color='blue', linewidth=2, label='Online Poly Smooth (deg=3)', zorder=1)
+        ax_traj.scatter(df_plot['smooth_x'], df_plot['smooth_y'], color='navy', s=10, alpha=0.5, zorder=2)
+        # Đường raw đè lên trên
+        ax_traj.plot(df_plot['x_center'], df_plot['y_center'], color='red', linewidth=1, linestyle='--', alpha=0.7, label='Raw Trajectory', zorder=3)
+        ax_traj.scatter(df_plot['x_center'], df_plot['y_center'], color='darkred', s=12, marker='o', label='Raw Points', zorder=4)
+
+        ax_traj.invert_yaxis()
+        ax_traj.set_title(f'Online Poly Smooth Trajectory 2D\n{csv_path.name}', fontsize=14, fontweight='bold')
+        ax_traj.set_xlabel('X (pixels)')
+        ax_traj.set_ylabel('Y (pixels)')
+        ax_traj.grid(True, linestyle=':', alpha=0.6)
+        ax_traj.legend(loc='best')
+        plt.tight_layout()
+
+        out_traj_img = csv_path.with_name(csv_path.stem + '_trajectory.png')
+        fig_traj.savefig(out_traj_img, dpi=150)
+        print(f"Saved 2D trajectory plot successfully to: {out_traj_img}")
+        plt.close(fig_traj)
+
     plt.tight_layout()
     
     # Lưu biểu đồ thành file ảnh cùng thư mục với file CSV

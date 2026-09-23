@@ -8,12 +8,17 @@ def main():
     parser = argparse.ArgumentParser(description="Crop and resize images based on config.npy")
     parser.add_argument("--input", type=str, required=True, help="Input directory containing session folders")
     parser.add_argument("--output", type=str, required=True, help="Output directory to save cropped images")
+    parser.add_argument("--crop_width", "--crop_w", type=int, default=2050, help="Width to crop the board horizontally (default: 2050)")
+    parser.add_argument("--center_x", type=int, default=1337, help="Center X coordinate for horizontal crop (default: 1337)")
     args = parser.parse_args()
 
     tool1_output_dir = args.input
     crop_images_dir = args.output
+    crop_w_req = args.crop_width
+    custom_center_x = args.center_x
     
     os.makedirs(crop_images_dir, exist_ok=True)
+    print(f"[INFO] Crop Request: Width={crop_w_req}px, CenterX={custom_center_x}px (Auto Pad Top/Bottom to square {crop_w_req}x{crop_w_req} -> 640x640)")
     
     if not os.path.exists(tool1_output_dir):
         print(f"Directory not found: {tool1_output_dir}")
@@ -82,12 +87,9 @@ def main():
                 
             img_h, img_w = img.shape[:2]
             
-            # Force the crop box to be a square by expanding the shorter dimension
-            # 1. Crop về 1600 x 1440
-            crop_w_req = 1600
-            crop_h_req = 1440
-            
-            center_x = x + w // 2
+            # 1. Crop về crop_w_req x img_h
+            crop_h_req = img_h
+            center_x = custom_center_x if custom_center_x is not None else (x + w // 2)
             x1 = center_x - crop_w_req // 2
             x2 = x1 + crop_w_req
             y1 = 0
@@ -96,18 +98,21 @@ def main():
             # Ensure within bounds
             if x1 < 0:
                 x1 = 0
-                x2 = crop_w_req
+                x2 = min(img_w, crop_w_req)
             if x2 > img_w:
                 x2 = img_w
-                x1 = img_w - crop_w_req
+                x1 = max(0, img_w - crop_w_req)
                 
             cropped_img_rect = img[y1:y2, x1:x2]
+            actual_crop_w = x2 - x1
+            actual_crop_h = y2 - y1
             
-            # 2. Pad thành vuông 1600 x 1600
-            square_size = 1600
+            # 2. Pad thành ảnh vuông (square_size x square_size)
+            square_size = max(crop_w_req, crop_h_req)
             square_crop = np.zeros((square_size, square_size, 3), dtype=np.uint8)
-            pad_top = (square_size - crop_h_req) // 2
-            square_crop[pad_top:pad_top+crop_h_req, :] = cropped_img_rect
+            pad_top = (square_size - actual_crop_h) // 2
+            pad_left = (square_size - actual_crop_w) // 2
+            square_crop[pad_top:pad_top + actual_crop_h, pad_left:pad_left + actual_crop_w] = cropped_img_rect
             
             cropped_img = square_crop
             
@@ -117,12 +122,12 @@ def main():
             cv2.imwrite(raw_crop_path, cropped_img)
             
             crop_h_actual, crop_w_actual = cropped_img.shape[:2]
-            print(f"    [DEBUG] {img_filename} | Original: {img_w}x{img_h} | RectCrop: {crop_w_req}x{crop_h_req} | PaddedSquare: {crop_w_actual}x{crop_h_actual}", end=" | ")
+            print(f"    [DEBUG] {img_filename} | Original: {img_w}x{img_h} | RectCrop: {actual_crop_w}x{actual_crop_h} | PaddedSquare: {crop_w_actual}x{crop_h_actual} (pad_top={pad_top})", end=" | ")
             
             # 3. Resize về 640 x 640
             resized_img = cv2.resize(cropped_img, (640, 640))
             res_h, res_w = resized_img.shape[:2]
-            print(f"Resized size: {res_w}x{res_h}")
+            print(f"Resized: {res_w}x{res_h}")
             
             save_path = os.path.join(session_images_dir, img_filename)
             cv2.imwrite(save_path, resized_img)
@@ -156,9 +161,9 @@ def main():
                         box_y2 = abs_cy + abs_bh / 2
                         
                         # Map to cropped and padded image coordinates
-                        new_x1 = box_x1 - x1
+                        new_x1 = box_x1 - x1 + pad_left
                         new_y1 = box_y1 - y1 + pad_top
-                        new_x2 = box_x2 - x1
+                        new_x2 = box_x2 - x1 + pad_left
                         new_y2 = box_y2 - y1 + pad_top
                         
                         # Clip bounding box to the padded square image boundaries
@@ -176,7 +181,7 @@ def main():
                             new_cx = new_x1 + new_bw / 2
                             new_cy = new_y1 + new_bh / 2
                             
-                            # Normalize by cropped image dimensions
+                            # Normalize by square image dimensions
                             out_cx = new_cx / square_size
                             out_cy = new_cy / square_size
                             out_bw = new_bw / square_size
@@ -192,7 +197,7 @@ def main():
                     
             image_count += 1
             
-        print(f"  -> Cropped to 1600x1440, Padded to 1600x1600, Resized to 640x640, adjusted labels, and saved {image_count} images to {session_crop_dir}")
+        print(f"  -> Cropped to {actual_crop_w}x{actual_crop_h}, Padded to {square_size}x{square_size}, Resized to 640x640, adjusted labels, and saved {image_count} images to {session_crop_dir}")
 
     print("\nCropping and label adjustment process completed!")
 
